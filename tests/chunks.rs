@@ -303,6 +303,26 @@ fn streaming_tar_decoders_enforce_integrity_and_output_limits() {
 }
 
 #[test]
+fn extraction_rejects_large_metadata_before_buffering_it() {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::GNULongName);
+    header.set_size(256 * 1024 * 1024);
+    header.set_cksum();
+    let encoded = zstd::stream::encode_all(&header.as_bytes()[..], 1).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let error = zipped_file_serving::client::extract_archive(
+        encoded.as_slice(),
+        output.path(),
+        1024 * 1024 * 1024,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("metadata record exceeds"),
+        "{error}"
+    );
+}
+
+#[test]
 fn extraction_rejects_parent_paths_links_and_duplicate_files() {
     for unsafe_kind in ["parent", "link", "duplicate"] {
         let mut tar = tar::Builder::new(Vec::new());
@@ -313,26 +333,6 @@ fn extraction_rejects_parent_paths_links_and_duplicate_files() {
             header.as_mut_bytes()[..9].copy_from_slice(b"../escape");
         } else {
             header.set_path("file").unwrap();
-        }
-
-        #[test]
-        fn extraction_rejects_large_metadata_before_buffering_it() {
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(tar::EntryType::GNULongName);
-            header.set_size(256 * 1024 * 1024);
-            header.set_cksum();
-            let encoded = zstd::stream::encode_all(&header.as_bytes()[..], 1).unwrap();
-            let output = tempfile::tempdir().unwrap();
-            let error = zipped_file_serving::client::extract_archive(
-                encoded.as_slice(),
-                output.path(),
-                1024 * 1024 * 1024,
-            )
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("metadata record exceeds"),
-                "{error}"
-            );
         }
         if unsafe_kind == "link" {
             header.set_entry_type(tar::EntryType::Symlink);
