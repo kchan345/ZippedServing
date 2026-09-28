@@ -1,6 +1,6 @@
 [package]
 name = "zipped-file-serving"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Standalone file server with bounded, parallel streaming LZ4 downloads"
@@ -13,19 +13,23 @@ clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 lz4 = "1"
 rayon = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io-util"] }
 tower-http = { version = "0.6", features = ["trace", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
+zstd = { version = "0.13", default-features = false }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
-serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]

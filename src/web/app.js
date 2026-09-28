@@ -59,6 +59,7 @@ async function loadDirectory(path, push = true) {
     $("breadcrumbs").append(" / ", directoryLink(part, accumulated));
   }
   $("download-directory").href = apiUrl("download", currentPath);
+  $("download-directory-zstd").href = apiUrl("download", currentPath, { format: "zstd" });
   $("limit").textContent = `Upload limit: ${size(maxUploadBytes)} per file. Files upload sequentially.`;
   $("entries").replaceChildren();
   for (const entry of listing.entries) {
@@ -79,6 +80,10 @@ async function loadDirectory(path, push = true) {
       compressed.href = apiUrl("download", path);
       compressed.textContent = entry.kind === "directory" ? ".tar.lz4" : ".lz4";
       cells[3].append(compressed);
+      const zstd = document.createElement("a");
+      zstd.href = apiUrl("download", path, { format: "zstd" });
+      zstd.textContent = entry.kind === "directory" ? ".tar.zstd" : ".zstd";
+      cells[3].append(" | ", zstd);
       if (entry.kind === "file") {
         const raw = document.createElement("a");
         raw.href = apiUrl("download", path, { format: "raw" });

@@ -27,10 +27,14 @@ $destinationPath = (Resolve-Path $Destination).Path
 $zip = Join-Path $destinationPath 'build.zip'
 Invoke-WebRequest $artifacts[0].archive_download_url -Headers $headers -OutFile $zip
 Expand-Archive -LiteralPath $zip -DestinationPath $destinationPath -Force
-$exe = Join-Path $destinationPath 'zipped-file-serving.exe'
-$expected = ((Get-Content (Join-Path $destinationPath 'SHA256SUMS.txt') -Raw) -split '\s+')[0]
-$actual = (Get-FileHash $exe -Algorithm SHA256).Hash
-if ($expected -ine $actual) { throw 'Executable SHA-256 checksum mismatch.' }
+foreach ($name in @('zipped-file-serving.exe', 'zipped-file-client.exe')) {
+    $exe = Join-Path $destinationPath $name
+    $lines = @(Get-Content (Join-Path $destinationPath 'SHA256SUMS.txt') | Where-Object { $_ -match ('^[0-9a-fA-F]{64}  ' + [regex]::Escape($name) + '$') })
+    if ($lines.Count -ne 1) { throw "Missing or duplicate checksum for $name." }
+    $expected = ($lines[0] -split '\s+')[0]
+    $actual = (Get-FileHash $exe -Algorithm SHA256).Hash
+    if ($expected -ine $actual) { throw "Executable SHA-256 checksum mismatch: $name." }
+    Write-Output "Verified executable: $exe"
+}
 Remove-Item -LiteralPath $zip
 Write-Output "Downloaded commit $($run.head_sha) from $($run.html_url)"
-Write-Output "Verified executable: $exe"

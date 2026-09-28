@@ -19,7 +19,10 @@ use serde::Deserialize;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{ApiError, AppState, blocking, compression::ParallelLz4, paths};
+use crate::{
+    ApiError, AppState, blocking, paths,
+    transfer::{Codec, Encoder},
+};
 
 const CHUNK_SIZE: usize = 256 * 1024;
 const CHANNEL_DEPTH: usize = 8;
@@ -29,6 +32,7 @@ const CHANNEL_DEPTH: usize = 8;
 enum Format {
     #[default]
     Lz4,
+    Zstd,
     Raw,
 }
 
@@ -40,9 +44,9 @@ pub(crate) struct DownloadQuery {
     format: Format,
 }
 
-struct ChannelWriter {
-    sender: mpsc::Sender<io::Result<Bytes>>,
-    buffer: Vec<u8>,
+pub(crate) struct ChannelWriter {
+    pub(crate) sender: mpsc::Sender<io::Result<Bytes>>,
+    pub(crate) buffer: Vec<u8>,
 }
 
 impl ChannelWriter {
@@ -86,10 +90,10 @@ enum Source {
     Directory(PathBuf),
 }
 
-struct DownloadStream {
-    receiver: ReceiverStream<io::Result<Bytes>>,
+pub(crate) struct DownloadStream {
+    pub(crate) receiver: ReceiverStream<io::Result<Bytes>>,
     // Hold the slot until both the HTTP body and producer have finished.
-    _permit: Arc<OwnedSemaphorePermit>,
+    pub(crate) _permit: Arc<OwnedSemaphorePermit>,
 }
 
 impl Stream for DownloadStream {
@@ -124,7 +128,7 @@ pub(crate) async fn download(
             if matches!(query.format, Format::Raw) {
                 return Err(ApiError::new(
                     StatusCode::BAD_REQUEST,
-                    "Directory downloads require LZ4 compression",
+                    "Directory downloads require LZ4 or zstd compression",
                 ));
             }
             Source::Directory(path)
@@ -140,8 +144,11 @@ pub(crate) async fn download(
     })
     .await?;
     let suffix = match (&source, &query.format) {
-        (Source::Directory(_), _) => ".tar.lz4",
+        (Source::Directory(_), Format::Lz4) => ".tar.lz4",
+        (Source::Directory(_), Format::Zstd) => ".tar.zstd",
+        (Source::Directory(_), Format::Raw) => unreachable!(),
         (_, Format::Lz4) => ".lz4",
+        (_, Format::Zstd) => ".zstd",
         (_, Format::Raw) => "",
     };
     let filename = format!("{name}{suffix}");
@@ -203,7 +210,12 @@ fn produce(
         }
         return output.flush();
     }
-    let mut encoder = ParallelLz4::new(output, pool)?;
+    let codec = if matches!(format, Format::Zstd) {
+        Codec::Zstd
+    } else {
+        Codec::Lz4
+    };
+    let mut encoder = Encoder::new(output, codec, pool)?;
     match source {
         Source::File(mut file) => {
             copy(&mut file, &mut encoder)?;

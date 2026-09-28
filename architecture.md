@@ -1,12 +1,14 @@
 # Architecture and tradeoffs
 
-## Shape of the executable
+## Shape of the executables
 
 Rust/Axum/Tokio handles HTTP and asynchronous uploads. HTML, CSS, and JavaScript
 are compiled in using `include_str!`; no asset directory, Node runtime, database,
 or service installation is needed. Clap handles the directory argument and
 resource limits. A shared Rayon pool does native liblz4 block compression.
-The MSVC Windows x64 build statically links the C runtime via `.cargo/config.toml`.
+The separate Rust client uses blocking reqwest/rustls with streaming responses,
+native codec decoders, and staged output. Both MSVC Windows x64 builds statically
+link the C runtime via `.cargo/config.toml`.
 GitHub's Windows Server 2025 hosted image supplies MSVC, rather than assuming
 Linux-built binaries will run on Windows. Generic x64 code is used, not
 `target-cpu=native`, so runner-specific CPU instructions are not required.
@@ -21,6 +23,10 @@ Files:
 | `src\compression.rs` | Ordered, bounded, parallel LZ4 frame writer |
 | `src\download.rs` | File/tar production, HTTP backpressure, attachment names |
 | `src\web\` | Embedded browser application |
+| `src\transfer.rs` | Shared codec, chunk envelope, negotiation types, incremental XXH3-128 |
+| `src\chunk_api.rs` | Manifest, independent chunk requests, staged upload sessions |
+| `src\client.rs` | Streaming client, extraction, chunk verification and publication |
+| `src\bin\zipped-file-client.rs` | Standalone client CLI |
 | `tests\http.rs` | API and filesystem integration tests |
 | `scripts\smoke-test.ps1` | Black-box Windows executable test without a compiler |
 
@@ -35,8 +41,9 @@ Files:
 The default is **LZ4 FAST(1)**. The native codec is reused; only the small standard
 frame wrapper is implemented here to parallelize compression without a
 whole-file buffer. An existing serial frame encoder would be simpler but can
-make one CPU core the storage-throughput bottleneck. Codec selection is
-deliberately not configurable until measurements justify additional formats.
+make one CPU core the storage-throughput bottleneck. The native client can also select zstd level 1, favoring a smaller transfer
+at higher CPU cost. The browser/API retain LZ4 defaults. Zstd encoding is
+serial in this implementation; the LZ4 worker setting does not parallelize it.
 
 Frames use magic `0x184D2204`, version 1, independent 4 MiB blocks, block
 checksums, and no known content size. Each compressed block uses the standard
@@ -54,7 +61,7 @@ References: [LZ4 frame specification](https://github.com/lz4/lz4/blob/dev/doc/lz
 [Snappy project](https://github.com/google/snappy).
 Upstream benchmark numbers are not measurements of this server.
 
-## Download pipeline and backpressure
+## Conventional archive pipeline and backpressure
 
 ```text
 regular file -----------+
@@ -106,7 +113,7 @@ returning a valid archive. Before streaming starts, failures use HTTP error
 statuses. Ctrl+C stops accepting new connections and waits for active requests;
 there is no forced shutdown timeout.
 
-## Uploads and consistency
+## Browser uploads and consistency
 
 The browser sends a raw `PUT` body for each file, not a buffered multipart
 form. The server enforces size both from Content-Length when present and
@@ -128,6 +135,123 @@ Archives are live views, not snapshots. Files can change, disappear, or be
 uploaded while traversal is running; this may produce a mixed-time view or
 abort the download. For coherent backups, quiesce writers or serve an externally
 created filesystem snapshot. The utility does not create VSS snapshots.
+
+## Negotiated chunk protocol (native client)
+
+Native transfers use a manifest and independent HTTP file-chunk requests
+instead of splitting an opaque tar archive. This keeps source chunks seekable
+and retryable without replaying tar from the beginning, caching compressed data
+on disk, or retaining a large in-memory archive. A directory manifest describes
+the tree (including empty directories) and paths inside one top-level directory.
+The result on disk is the same layout as extracting the conventional archive.
+The tradeoff is one manifest and more HTTP requests; many tiny files are less
+efficient than one tar stream. The browser's existing transfers remain compatible.
+
+The client proposes the codec and raw `chunk_size`; the server replies with
+`min(requested, server maximum)`, normally **268435456 bytes (256 MiB)**.
+Supported sizes are 1 MiB through 1 GiB. Negotiation declares protocol
+`zfs-chunks-v1` and hash `xxh3-128`; the client rejects mismatches. Each file has
+offsets 0, split, 2*split, etc. with a short last chunk. Empty files need no
+data requests. Manifests are capped at 100000 entries and 16 MiB of serialized
+JSON; very large trees must be transferred in subdirectories.
+
+A download manifest records source size and modification time. Each chunk
+checks them before opening its range and after encoding. This catches normal
+concurrent changes, but a same-size change with a deliberately preserved
+timestamp can escape detection. This is not a snapshot or cryptographic source
+identity. Source directories should be quiescent during a transfer.
+
+Each HTTP chunk has the following binary envelope, independent of HTTP's own
+transfer encoding:
+
+| Field | Encoding |
+| --- | --- |
+| Magic | Four ASCII bytes `ZFC1` |
+| Codec | One byte: 1 = LZ4, 2 = zstd |
+| File offset | u64 little endian |
+| Uncompressed length | u64 little endian |
+| Compressed records | Repeated u32 little-endian size followed by 1-262144 bytes |
+| End of compressed records | Zero u32 |
+| Integrity footer | XXH3-128 of raw bytes, 16 bytes big endian |
+
+Concatenating the record payloads yields exactly one independently compressed
+frame. Record framing lets the receiver find the hash footer without knowing
+the compressed length beforehand or relying on poorly supported HTTP trailers.
+The decompressor receives an EOF at the record terminator, not the integrity
+footer. Header values, decoded length, footer, and end of HTTP body are checked.
+Encoded data has a conservative size budget to reject pathological inputs.
+Decoders consume 256 KiB copy buffers plus codec state; chunks never become
+256 MiB allocations. LZ4 uses up to 4 MiB codec blocks and zstd windows are
+limited to 8 MiB. Zstd frames requiring a larger window are explicitly rejected.
+LZ4 uploads default to two compression workers on the client; an eight-thread
+server pool is still shared across active downloads.
+
+The client streams verified output into a new adjacent staging directory.
+It can write a chunk before the footer arrives, but never publishes that
+directory until all chunks verify. Retry truncates the staged file back to its
+last verified offset. There are at most three attempts per download chunk.
+After completion, files are flushed/synchronized and the directory is renamed
+to the requested, previously nonexistent destination. This protects existing
+output from corrupt/partial transfers without duplicating decompressed file
+contents. Crashes can leave staging directories for operator cleanup.
+
+Chunk uploads create an opaque UUID session with an exclusive upload staging
+file and one upload semaphore permit. Each PUT must match the next offset;
+decoding and XXH3-128 validation happen in a blocking worker via a streaming
+async-to-sync bridge. A bad chunk truncates the file back to the previous
+verified offset and returns 422. A good chunk returns its hash and next offset;
+the client checks both. Finalization requires the full declared size, syncs
+the file, and publishes with no-clobber semantics. Competing operations on one
+session return 503 instead of racing. Sessions count against `--max-uploads`
+until completion/cancellation; abandoned idle sessions are reaped after 15
+minutes when subsequent session operations run. There is no persisted resume
+journal or automatic replay of uploads after an ambiguous network failure.
+Directory uploads are file-transactional, not tree-transactional.
+
+### Integrity algorithm choice
+
+XXH3-128 provides a fast, incremental, non-cryptographic digest with a much wider
+collision space than CRC32 or XXH32. It is computed over the same raw copy
+buffers already passing through compression/decompression; no reread or
+whole-file prehash is required. Verified offset, raw length, file metadata, and
+per-chunk digest together detect ordinary data corruption, missing chunks,
+wrong ordering, and incomplete files. No separate full-file hash is advertised.
+
+CRC32C can be extremely cheap on hardware with matching instructions but has
+only 32 bits and throughput varies by implementation. XXH3-64 is similarly fast
+but has less collision headroom. BLAKE3 is a good choice for cryptographic
+integrity with SIMD/parallelism, but requires more work than a non-cryptographic
+transfer checksum. SHA-256 is broadly interoperable but not the preferred
+minimal-CPU hot-path option here. XXH3-128 prioritizes throughput and accidental
+corruption detection; it does not authenticate data and is not a substitute
+for TLS or a signature. Codec block/frame checksums are retained for
+interoperability, so their small additional memory pass remains.
+
+No universally lowest CPU hash or non-bottleneck claim is made without a
+hardware/data-specific benchmark. The chosen algorithm is intended to keep
+hashing cheaper than the codecs; the CI checks correctness and bounded memory,
+not a measured hashing-versus-codec throughput threshold. See the
+[xxHash project](https://github.com/Cyan4973/xxHash) for algorithm details.
+
+### Direct archive compatibility
+
+The same client can stream conventional `tar.lz4`, `tar.zst`, and `tar.zstd`
+URLs. Codec detection uses frame magic. It decodes directly into a tar parser
+and staged files without saving compressed input or a tar intermediate.
+It drains past tar's end marker so late decoder/checksum failures cannot be
+mistaken for a successful extraction. Output paths are checked against Windows
+path traversal and reserved-name rules; symbolic/hard links, special entries,
+duplicate files, and nonzero data after tar end are rejected. A decompressed
+byte budget and entry-count cap limit extraction. A streaming physical-header
+guard caps tar metadata extension records at 1 MiB before the tar parser can
+buffer them; regular file content remains streamed. The local staging parent must
+be trusted against hostile local filesystem mutation, just as the server root.
+HTTP redirects are disabled; use the final target URL directly.
+
+Direct archives are compatibility mode, not the chunk protocol: they have
+no XXH3 footer, independent retries, or negotiated splitting. Frame checksums
+are checked when present. A failed archive transfer is restarted from the
+beginning rather than transparently downgrading verification.
 
 ## Filesystem and network trust boundary
 
@@ -177,11 +301,20 @@ without these measurements.
 
 ## CI and reproducibility
 
-GitHub Actions on `windows-2025` runs rustfmt, Clippy with denied warnings,
-locked dependency tests, and an optimized release build. Integration tests
+GitHub Actions on `windows-2025` runs rustfmt and lockfile consistency checks,
+Clippy with denied warnings, locked dependency tests, and optimized release
+builds for both binaries. Generated formatting/lockfile corrections are
+published as a patch artifact on failure, allowing fixes without local tools.
+Integration tests
 cover uploads, no-overwrite, paths, limits, aborted bodies, nested archives,
-and Windows junctions. The release smoke test exercises real HTTP requests
-and extraction with Windows tar. Artifacts include a SHA-256 checksum and
+and Windows junctions, plus both chunk codecs, hash corruption, offset
+validation, truncation, negotiation, upload rollback, and unsafe archive paths.
+Release smoke tests exercise real HTTP requests, the actual native client,
+and extraction with Windows tar. A 256 MiB + 17 byte fixture crosses the
+default chunk boundary in both transfer directions with both codecs; the
+client's measured peak working set must stay below 128 MiB. This threshold
+guards against whole-chunk buffering, not all possible workloads or memory
+allocators. Artifacts include both executables and SHA-256 checksums and
 have a 30-day retention period. Local testing downloads that artifact using
 GH_TOKEN without installing Rust, MSVC, Node, Docker, or a codec.
 

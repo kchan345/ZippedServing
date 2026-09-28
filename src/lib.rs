@@ -1,6 +1,9 @@
+mod chunk_api;
+pub mod client;
 mod compression;
 mod download;
 mod paths;
+pub mod transfer;
 
 use std::{fs, io, path::PathBuf, sync::Arc, time::UNIX_EPOCH};
 
@@ -24,6 +27,7 @@ pub struct Config {
     pub max_downloads: usize,
     pub max_uploads: usize,
     pub max_upload_bytes: u64,
+    pub max_chunk_bytes: u64,
 }
 
 impl Config {
@@ -41,6 +45,7 @@ impl Config {
             max_downloads: 2,
             max_uploads: 4,
             max_upload_bytes: 100 * 1024 * 1024 * 1024,
+            max_chunk_bytes: transfer::DEFAULT_SPLIT,
         })
     }
 }
@@ -50,9 +55,11 @@ pub(crate) struct AppState {
     pool: Arc<rayon::ThreadPool>,
     downloads: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
+    sessions: chunk_api::Sessions,
 }
 
 pub fn app(config: Config) -> io::Result<Router> {
+    transfer::validate_split(config.max_chunk_bytes)?;
     if config.compression_threads == 0
         || config.max_downloads == 0
         || config.max_uploads == 0
@@ -71,6 +78,7 @@ pub fn app(config: Config) -> io::Result<Router> {
     let state = Arc::new(AppState {
         downloads: Arc::new(Semaphore::new(config.max_downloads)),
         uploads: Arc::new(Semaphore::new(config.max_uploads)),
+        sessions: Default::default(),
         pool: Arc::new(pool),
         config,
     });
@@ -88,6 +96,11 @@ pub fn app(config: Config) -> io::Result<Router> {
         .route("/api/download", get(download::download))
         .route("/api/upload", put(upload))
         .route("/api/mkdir", post(mkdir))
+        .route("/api/transfer/manifest", get(chunk_api::manifest))
+        .route("/api/transfer/chunk", get(chunk_api::download_chunk))
+        .route("/api/transfer/uploads", post(chunk_api::start_upload).layer(DefaultBodyLimit::max(64 * 1024)))
+        .route("/api/transfer/uploads/{id}", put(chunk_api::upload_chunk).delete(chunk_api::cancel_upload))
+        .route("/api/transfer/uploads/{id}/complete", post(chunk_api::complete_upload))
         .layer(DefaultBodyLimit::disable())
         .layer(SetResponseHeaderLayer::overriding(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
         .layer(SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static("no-store")))
