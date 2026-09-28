@@ -53,7 +53,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item .\target\x86_64-pc-windows-msvc\release\zipped-file-serving.exe .\dist\
-          Copy-Item readme.md, architecture.md .\dist\
+          Copy-Item readme.md, architecture.md, LICENSE .\dist\
           $hash = (Get-FileHash .\dist\zipped-file-serving.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  zipped-file-serving.exe" | Set-Content .\dist\SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
