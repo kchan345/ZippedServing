@@ -257,12 +257,8 @@ async fn conventional_http_archives_flush_the_complete_codec_frame() {
         assert_eq!(response.status(), StatusCode::OK);
         let body = bytes(response).await;
         let output = tempfile::tempdir().unwrap();
-        zipped_file_serving::client::extract_archive(
-            body.as_slice(),
-            output.path(),
-            1024 * 1024,
-        )
-        .unwrap();
+        zipped_file_serving::client::extract_archive(body.as_slice(), output.path(), 1024 * 1024)
+            .unwrap();
         assert_eq!(
             fs::read(output.path().join("folder/data")).unwrap(),
             b"final bytes"
