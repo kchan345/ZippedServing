@@ -1,8 +1,8 @@
 # ZippedServing
 
-A single Windows x64 executable serving a local directory through an embedded
-web application. Browse folders, upload files, create folders, and download files
-or entire directory trees with **on-the-fly parallel LZ4 compression**.
+A standalone Windows x64 server and a separate standalone Windows x64 client.
+Browse folders, upload files, create folders, and download files or entire
+directory trees with **streaming LZ4 or zstd compression**.
 No compressed download or intermediate tar archive is written on the server.
 There are no runtime packages, frontend assets, or Rust tools to install.
 
@@ -44,6 +44,7 @@ Existing files cannot be overwritten, and deletion is not exposed.
 | `--max-downloads` | `2` | Active downloads, including raw; 1-256 |
 | `--max-uploads` | `4` | Active uploads; 1-256 |
 | `--max-upload-bytes` | `107374182400` | Per-file upload limit (100 GiB) |
+| `--max-chunk-mib` | `256` | Maximum negotiated uncompressed chunk size, 1-1024 MiB |
 
 Set `$env:RUST_LOG = 'debug'` for detailed server logs.
 
@@ -54,8 +55,8 @@ file picker or drag and drop. Multiple files upload sequentially with progress
 and cancellation. New folders can be created in the current directory.
 Folder upload is not implemented; create folders and upload their files.
 
-* **File:** `filename.lz4`, a standard LZ4 frame containing the original bytes.
-* **Directory:** `directory.tar.lz4`, a standard LZ4 frame containing a tar
+* **File:** `filename.lz4` or `filename.zstd`, a standard frame containing the original bytes.
+* **Directory:** `directory.tar.lz4` or `directory.tar.zstd`, a standard frame containing a tar
   archive with one top-level directory, nested files, and empty directories.
 * **Raw:** uncompressed file download for clients without a decoder or for
   already-compressed data. Directories require compression.
@@ -69,6 +70,95 @@ lz4 -d .\report.txt.lz4 .\report.txt
 lz4 -d .\photos.tar.lz4 .\photos.tar
 tar -xf .\photos.tar
 ```
+
+Alternatively, the included native client extracts both formats directly from
+HTTP without needing an external decoder or saving the compressed archive.
+
+## Standalone client: verified chunk transfers
+
+`zipped-file-client.exe` is a single executable, independent of the server
+executable. No Rust, codec, or other runtime installation is required.
+
+```powershell
+# Directory or file download to a NEW local directory:
+.\zipped-file-client.exe download `
+  'http://server:8081/api/download?path=photos' 'D:\Received'
+
+# Request zstd with 64 MiB uncompressed chunks:
+.\zipped-file-client.exe download `
+  'http://server:8081/api/download?path=photos' 'D:\ReceivedZstd' `
+  --codec zstd --split-mib 64
+
+# Stream-extract a conventional tar archive from this server:
+.\zipped-file-client.exe download `
+  'http://server:8081/api/download?path=photos&format=zstd' 'D:\Extracted' --archive
+
+# Ordinary archive URLs select archive mode automatically:
+.\zipped-file-client.exe download `
+  'https://example.test/photos.tar.lz4' 'D:\ExtractedLz4'
+
+# Upload one file, or an entire tree including empty directories:
+.\zipped-file-client.exe upload 'D:\report.bin' `
+  'http://server:8081/api/upload?path=report.bin'
+.\zipped-file-client.exe upload 'D:\Photos' `
+  'http://server:8081/api/upload?path=incoming-photos' --codec zstd
+```
+
+For downloads, the output directory must **not exist**, and its parent must
+exist. `photos` appears under `D:\Received\photos`; a single file similarly
+appears under the new output directory. Downloads first write decompressed
+files into an adjacent temporary directory and publish it only after every
+chunk/frame verifies. Errors clean up that staging directory. No compressed
+archive or whole-chunk temporary file is created.
+
+For `/api/download` URLs the default is the **chunk protocol**, not tar. A
+manifest preserves the same file tree, and each regular file is transferred
+in separate HTTP requests. `--codec` selects the negotiated codec in this
+mode; the URL's legacy `format` parameter is used only with `--archive`.
+`--archive` streams a single ordinary tar frame and does **not** provide
+chunk retries or XXH3-128 verification; it validates codec checksums instead.
+Both `.tar.zst` and `.tar.zstd` work; detection uses frame magic, not extension.
+There is no silent fallback from a failed negotiation to an unverified download.
+
+The client proposes an uncompressed split size (default **256 MiB**), and the
+server replies with the smaller of that and `--max-chunk-mib`. Sizes from 1 MiB
+to 1 GiB are accepted. Each nonempty file is split independently; the last
+chunk may be shorter. Empty files need no chunk request. Chunk boundaries are
+independent of LZ4's internal 4 MiB codec blocks or the 256 KiB I/O buffers.
+An entire 256 MiB chunk is **never buffered in client memory**.
+
+Every chunk carries its offset, raw length, codec, and an **XXH3-128** hash of
+the uncompressed bytes. Hashing occurs incrementally in the compression/
+decompression copy loop, without a second disk pass. Download chunks are
+retried up to three total attempts. Uploads advance only after the server
+decodes and verifies the chunk; bad chunks are truncated back to the previous
+verified offset, and the client checks the returned hash and next offset.
+Only a completed upload is published without overwriting.
+
+XXH3-128 was selected for high throughput and low CPU cost, not cryptographic
+security. It detects accidental corruption; a malicious peer can forge it.
+Use HTTPS through a trusted reverse proxy when authentication or protection
+against active modification is required. SHA-256 artifact checksums are
+separate from the fast transfer hash.
+
+| Client option | Default | Meaning |
+| --- | --- | --- |
+| `--split-mib` | `256` | Requested uncompressed chunk size, 1-1024 MiB |
+| `--codec` | `lz4` | `lz4` or `zstd`, for chunk transfers |
+| `--max-bytes` | `107374182400` | Aggregate input/output limit; archive mode counts tar headers/padding too |
+| `--timeout-seconds` | `3600` | Maximum time per HTTP request |
+| `--compression-threads` | `2` | Parallel LZ4 upload workers; decoding is serial |
+
+The current client processes chunks and files sequentially. It does not persist
+resume state across runs. Uploads do not automatically retry ambiguous network
+failures; the client attempts to cancel that file's session and reports failure.
+Inactive upload sessions expire after 15 minutes and are reaped by subsequent
+session operations. Abrupt server termination can leave staging files.
+Directory uploads publish individual files, not a transactional whole tree:
+completed files/directories remain if a later file fails. A fresh destination
+is required; existing files/directories are never intentionally merged.
+Do not change source files while transferring: metadata checks detect ordinary
+changes but are not filesystem snapshots.
 
 The receiver may save/extract archives; the no-intermediate-disk constraint
 applies to the server's compression pipeline. Do not pipe binary archive data
@@ -102,6 +192,12 @@ components. This URL separator is independent of Windows filesystem syntax.
 | GET | `/api/download?path=report.txt&format=raw` | Original file |
 | PUT | `/api/upload?path=new.txt` | Raw request body saved as a new file |
 | POST | `/api/mkdir?path=new-folder` | Create one folder; parent must exist |
+| GET | `/api/transfer/manifest?path=photos&chunk_size=268435456&codec=lz4` | Negotiate chunks and list tree |
+| GET | `/api/transfer/chunk?path=...&stamp=...&offset=0&chunk_size=268435456&codec=lz4` | One compressed, verified file chunk |
+| POST | `/api/transfer/uploads` | JSON `{path,size,chunk_size,codec}`; create upload session |
+| PUT | `/api/transfer/uploads/{id}?offset=0` | Stream one chunk; return verified hash/next offset |
+| POST | `/api/transfer/uploads/{id}/complete` | Publish a fully received file |
+| DELETE | `/api/transfer/uploads/{id}` | Cancel and remove staged upload |
 
 Writes require `X-Requested-With: zipped-file-serving`. This is a browser
 cross-origin write safeguard, **not authentication**. No CORS access is enabled.
@@ -127,8 +223,10 @@ Windows 11 x64 environment. Rust, native liblz4, and the C runtime are staticall
 linked; Windows system DLLs are still required. No Docker or local compiler is
 needed. The executable is unsigned, so Windows SmartScreen may warn.
 
-The workflow runs formatting, Clippy, unit/integration tests, an optimized build,
-and a real HTTP smoke test. It publishes the executable, documentation, and
+The workflow runs formatting/lockfile checks, Clippy, unit/integration tests,
+optimized builds, and real HTTP smoke tests for both binaries. A 256 MiB + 17
+byte fixture crosses the default chunk boundary for both codecs and directions;
+the test requires peak client working set below 128 MiB. It publishes both executables, documentation, and
 SHA-256 checksum as a 30-day artifact. Push to `main`, open a pull request, or
 use **Run workflow** to build.
 
@@ -138,6 +236,9 @@ To fetch and verify the latest successful `main` build using an existing
 ```powershell
 .\scripts\download-artifact.ps1
 .\scripts\smoke-test.ps1 -Executable .\artifacts\windows-x64\zipped-file-serving.exe
+.\scripts\client-smoke-test.ps1 `
+  -Server .\artifacts\windows-x64\zipped-file-serving.exe `
+  -Client .\artifacts\windows-x64\zipped-file-client.exe -Large
 .\artifacts\windows-x64\zipped-file-serving.exe 'D:\Files'
 ```
 

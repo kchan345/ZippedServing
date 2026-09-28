@@ -9,7 +9,7 @@
 </head>
 <body>
   <main>
-    <header><h1>Local file server</h1><p>Streaming LZ4 downloads. No archive is saved on the server.</p></header>
+    <header><h1>Local file server</h1><p>Streaming LZ4/zstd downloads. No archive is saved on the server.</p></header>
     <p class="notice">Trusted networks only: this server has no login. Existing files are never overwritten.
       Links and Windows reparse points are blocked and omitted from archives.</p>
     <nav id="breadcrumbs" aria-label="Directory"></nav>
@@ -17,6 +17,7 @@
       <button id="refresh" type="button">Refresh</button>
       <button id="mkdir" type="button">New folder</button>
       <a id="download-directory" class="button">Download directory (.tar.lz4)</a>
+      <a id="download-directory-zstd" class="button">Download directory (.tar.zstd)</a>
       <label class="button">Upload files <input id="upload" type="file" multiple></label>
     </section>
     <p id="limit"></p>
@@ -31,8 +32,9 @@
       <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Download</th></tr></thead>
       <tbody id="entries"></tbody>
     </table></div>
-    <footer>Files: .lz4 &middot; Directories: .tar.lz4 (tar inside an LZ4 frame).
-      Use an LZ4 decoder, then tar to extract directories. Raw file downloads need no decoder.</footer>
+    <footer>Files: .lz4/.zstd &middot; Directories: .tar.lz4/.tar.zstd.
+      Use zipped-file-client.exe for streaming extraction or verified 256 MiB chunk transfers.
+      Browser transfers use ordinary archives. Raw file downloads need no decoder.</footer>
   </main>
 </body>
 </html>

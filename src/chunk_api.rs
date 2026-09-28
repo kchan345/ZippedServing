@@ -26,7 +26,8 @@ use crate::{
     transfer::{self, ChunkAck, Codec, Manifest, ManifestEntry, UploadInfo, UploadRequest},
 };
 
-pub(crate) type Sessions = Mutex<HashMap<String, Arc<AsyncMutex<Upload>>>>;
+type UploadMap = HashMap<String, Arc<AsyncMutex<Upload>>>;
+pub(crate) type Sessions = Mutex<UploadMap>;
 
 pub(crate) struct Upload {
     temp: Option<tempfile::NamedTempFile>,
@@ -203,7 +204,7 @@ pub(crate) async fn download_chunk(
 
 fn sessions(
     state: &AppState,
-) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<AsyncMutex<Upload>>>>, ApiError> {
+) -> Result<std::sync::MutexGuard<'_, UploadMap>, ApiError> {
     let mut sessions = state.sessions.lock().map_err(|error| {
         tracing::error!(%error, "Upload session lock poisoned");
         ApiError::new(
