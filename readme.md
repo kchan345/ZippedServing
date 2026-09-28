@@ -45,6 +45,7 @@ Existing files cannot be overwritten, and deletion is not exposed.
 | `--max-uploads` | `4` | Active uploads; 1-256 |
 | `--max-upload-bytes` | `107374182400` | Per-file upload limit (100 GiB) |
 | `--max-chunk-mib` | `256` | Maximum negotiated uncompressed chunk size, 1-1024 MiB |
+| `--profiles-file` | `%LOCALAPPDATA%\ZippedServing\profiles.json` | Shared command profiles; must be outside the served tree |
 
 Set `$env:RUST_LOG = 'debug'` for detailed server logs.
 
@@ -73,6 +74,66 @@ tar -xf .\photos.tar
 
 Alternatively, the included native client extracts both formats directly from
 HTTP without needing an external decoder or saving the compressed archive.
+
+## Copy a download command from the web application
+
+Click **Client command** beside a directory, or in the toolbar for the currently
+open directory (including the root). The command panel generates a **PowerShell**
+command for the standalone client. It does not execute commands in the browser
+or on the server.
+
+Create a named profile containing one **client executable path** (for example
+`C:\Tools\zipped-file-client.exe`) and one **general download folder** (for example
+`D:\Downloads`). These are absolute Windows drive or UNC paths on the **client
+machine**; the server does not check whether they exist there. Save the profile,
+select it from the dropdown, review the command, and click **Copy command**.
+Names must be unique (case-insensitive). You can edit or delete profiles.
+There is a hard limit of **99 profiles**, enforced on both server and UI;
+editing and deleting still work at the limit.
+
+The generated command uses verified chunk downloads with the client's default
+codec and split size. For directory `photos`, it defaults to:
+
+```powershell
+& 'C:\Tools\zipped-file-client.exe' download 'http://server:8081/api/download?path=photos' 'D:\Downloads\photos-download'
+```
+
+The base folder `D:\Downloads` must already exist. The new output container
+`photos-download` must **not** exist, and the downloaded tree will be under
+`D:\Downloads\photos-download\photos`. Change **New output folder name** for
+repeat downloads. For the server root, the suggested container is `root-download`.
+The command URL uses the browser's current server origin: use the server's
+LAN hostname/IP in the browser if the command will run on another machine
+(`localhost` on that client would point to itself).
+
+Paths, URLs, spaces, apostrophes, and PowerShell metacharacters are quoted as
+literal arguments. Copy uses the clipboard API on HTTPS/localhost, with a
+selection-based fallback for ordinary HTTP LAN pages. If browser permissions
+prevent copying, the command is selected and the UI tells you to press Ctrl+C.
+Unsaved edits must be saved before a command is generated for that profile.
+
+**Profiles are stored on the server, not in browser local storage.** They survive
+browser and server restarts and are available to all browsers. Selection is
+per-page; on a fresh page the first saved profile is selected. Profiles are
+shared by server instances using the same profile file, even with different
+served roots. To isolate profiles or choose a different storage location:
+
+```powershell
+.\zipped-file-serving.exe 'D:\Files' --profiles-file 'C:\ServerState\profiles.json'
+```
+
+The parent directory is created when profiles are first used. The file and its
+adjacent `.lock` file must stay outside the served directory, in a location
+writable by the server account. The lock serializes access across processes;
+updates use a flushed temporary file and atomic replacement. Browser edits
+carry a revision: if another browser changes profiles, reload before saving
+instead of silently overwriting its changes. Invalid, unreadable, or unwritable
+storage is reported explicitly; a damaged store is never silently reset.
+File serving remains available if profile storage fails.
+
+**No authentication is added:** everyone who can reach the server can read,
+edit, or delete shared profiles. Do not store secrets or sensitive paths, and
+review shared executable paths before running generated commands.
 
 ## Standalone client: verified chunk transfers
 
@@ -198,6 +259,10 @@ components. This URL separator is independent of Windows filesystem syntax.
 | PUT | `/api/transfer/uploads/{id}?offset=0` | Stream one chunk; return verified hash/next offset |
 | POST | `/api/transfer/uploads/{id}/complete` | Publish a fully received file |
 | DELETE | `/api/transfer/uploads/{id}` | Cancel and remove staged upload |
+| GET | `/api/profiles` | JSON `{version,revision,profiles}` |
+| POST | `/api/profiles` | Create `{revision,name,client_path,download_folder}` |
+| PUT | `/api/profiles/{id}` | Update the same fields using the latest revision |
+| DELETE | `/api/profiles/{id}?revision=...` | Delete a shared profile using the latest revision |
 
 Writes require `X-Requested-With: zipped-file-serving`. This is a browser
 cross-origin write safeguard, **not authentication**. No CORS access is enabled.
@@ -229,6 +294,13 @@ byte fixture crosses the default chunk boundary for both codecs and directions;
 the test requires peak client working set below 128 MiB. It publishes both executables, documentation, and
 SHA-256 checksum as a 30-day artifact. Push to `main`, open a pull request, or
 use **Run workflow** to build.
+
+Profile API tests cover persistence, the exact 99-profile limit, conflicts,
+validation, and storage failures. Hosted Node tests parse generated commands
+with PowerShell, and Playwright tests run in the hosted image's Microsoft Edge
+to exercise the UI, clipboard behavior, server restarts, and execution of a
+generated command with the real client. These test-only packages are installed
+on GitHub, not required by the executable or installed locally.
 
 To fetch and verify the latest successful `main` build using an existing
 `GH_TOKEN` environment variable (requires repository Actions read permission):

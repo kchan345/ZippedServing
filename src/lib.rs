@@ -3,6 +3,7 @@ pub mod client;
 mod compression;
 mod download;
 mod paths;
+mod profiles;
 pub mod transfer;
 
 use std::{fs, io, path::PathBuf, sync::Arc, time::UNIX_EPOCH};
@@ -28,6 +29,7 @@ pub struct Config {
     pub max_uploads: usize,
     pub max_upload_bytes: u64,
     pub max_chunk_bytes: u64,
+    pub profiles_file: PathBuf,
 }
 
 impl Config {
@@ -46,6 +48,7 @@ impl Config {
             max_uploads: 4,
             max_upload_bytes: 100 * 1024 * 1024 * 1024,
             max_chunk_bytes: transfer::DEFAULT_SPLIT,
+            profiles_file: profiles::default_file()?,
         })
     }
 }
@@ -92,6 +95,14 @@ pub fn app(config: Config) -> io::Result<Router> {
         .route("/style.css", get(|| async {
             ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("web/style.css"))
         }))
+        .route("/commands.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("web/commands.js"))
+        }))
+        .route("/profile-ui.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("web/profile-ui.js"))
+        }))
+        .route("/api/profiles", get(profiles::list).post(profiles::create).layer(DefaultBodyLimit::max(32 * 1024)))
+        .route("/api/profiles/{id}", put(profiles::update).delete(profiles::delete).layer(DefaultBodyLimit::max(32 * 1024)))
         .route("/api/list", get(list))
         .route("/api/download", get(download::download))
         .route("/api/upload", put(upload))

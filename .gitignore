@@ -3,3 +3,6 @@
 /artifacts/
 /local-test/
 /New Text Document.txt
+/node_modules/
+/test-results/
+/playwright-report/
