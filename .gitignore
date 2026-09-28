@@ -1,0 +1,5 @@
+/target/
+*.part
+/artifacts/
+/local-test/
+/New Text Document.txt

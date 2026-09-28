@@ -1,0 +1,192 @@
+# Architecture and tradeoffs
+
+## Shape of the executable
+
+Rust/Axum/Tokio handles HTTP and asynchronous uploads. HTML, CSS, and JavaScript
+are compiled in using `include_str!`; no asset directory, Node runtime, database,
+or service installation is needed. Clap handles the directory argument and
+resource limits. A shared Rayon pool does native liblz4 block compression.
+The MSVC Windows x64 build statically links the C runtime via `.cargo/config.toml`.
+GitHub's Windows Server 2025 hosted image supplies MSVC, rather than assuming
+Linux-built binaries will run on Windows. Generic x64 code is used, not
+`target-cpu=native`, so runner-specific CPU instructions are not required.
+
+Files:
+
+| File | Responsibility |
+| --- | --- |
+| `src\main.rs` | CLI, listener, logging, graceful shutdown |
+| `src\lib.rs` | Routing, limits, listings, uploads, error responses |
+| `src\paths.rs` | Relative path validation and reparse-point checks |
+| `src\compression.rs` | Ordered, bounded, parallel LZ4 frame writer |
+| `src\download.rs` | File/tar production, HTTP backpressure, attachment names |
+| `src\web\` | Embedded browser application |
+| `tests\http.rs` | API and filesystem integration tests |
+| `scripts\smoke-test.ps1` | Black-box Windows executable test without a compiler |
+
+## Compression choice
+
+| Option | Strength | Cost / reason not chosen |
+| --- | --- | --- |
+| LZ4 fast | Very low compression/decompression CPU cost; standard frames; independent blocks parallelize naturally | Larger output than zstd, especially across block boundaries |
+| Snappy | Low CPU cost; useful within existing Snappy ecosystems | Less convenient end-user archive tooling; no clear advantage here over LZ4 |
+| zstd low/negative level | Better size/speed tradeoff for bandwidth-constrained networks; standard multithreaded encoder | More CPU and working memory; more tuning needed for storage-speed workloads |
+
+The default is **LZ4 FAST(1)**. The native codec is reused; only the small standard
+frame wrapper is implemented here to parallelize compression without a
+whole-file buffer. An existing serial frame encoder would be simpler but can
+make one CPU core the storage-throughput bottleneck. Codec selection is
+deliberately not configurable until measurements justify additional formats.
+
+Frames use magic `0x184D2204`, version 1, independent 4 MiB blocks, block
+checksums, and no known content size. Each compressed block uses the standard
+LZ4 block codec. If compression is not smaller, the block is stored raw.
+XXH32 protects the descriptor and individual encoded blocks. There is no
+whole-frame content checksum; checksums detect accidental corruption, not
+malicious alteration. The frame ends only after successful production.
+Tests decode frames through liblz4, including empty input, multiple blocks,
+incompressible blocks, and out-of-order worker completion potential. A separate
+PowerShell smoke decoder exercises the released executable's format.
+
+References: [LZ4 frame specification](https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md),
+[LZ4 project](https://github.com/lz4/lz4),
+[zstd project](https://github.com/facebook/zstd),
+[Snappy project](https://github.com/google/snappy).
+Upstream benchmark numbers are not measurements of this server.
+
+## Download pipeline and backpressure
+
+```text
+regular file -----------+
+                        +--> 4 MiB independent blocks --> shared LZ4 workers
+directory --> tar stream+                                  |
+                                                           v
+HTTP client <-- bounded channel <-- ordered frame writer <-+
+```
+
+Blocking filesystem/tar work runs outside Tokio's async executor. Each download
+has at most `compression_threads` outstanding block results. Workers return
+results independently, but the producer writes them in source order. A full
+work window waits for the oldest block before submitting another. A slow first
+block can delay later results: ordered framing is favored over custom indexing.
+
+The frame writer emits 256 KiB chunks into an eight-slot bounded Tokio channel
+(2 MiB queued HTTP payload). Backpressure propagates through the frame writer
+to block submission and ultimately filesystem reads. Memory scales with
+configured concurrency and worker count, not file/archive length. Budget
+roughly `2 * workers * 4 MiB` per active compressed download for block work,
+plus current input, output, copy buffers, codec allocations, and transport
+overhead. This is an allocation estimate, not an enforced process RSS cap.
+The shared pool bounds actual active compression threads across downloads;
+per-download windows bound queued work. Defaults cap workers at eight and
+active downloads at two. Directory listing JSON still scales with the number
+of entries in one directory; it is not paginated.
+
+Directory traversal retains one directory iterator per nesting level rather
+than collecting the whole tree. Tar preserves directory layout, empty files,
+and empty directories. It does not preserve Windows ACLs, alternate streams,
+all NTFS metadata, or hard-link identity. Unsupported filenames cause explicit
+stream failure; links/reparse points and upload staging files are intentionally
+omitted. Tar avoids ZIP's central-directory bookkeeping and its commonly
+expected DEFLATE encoding, but `.tar.lz4` is less familiar to Windows users.
+
+No download code creates a file on the server. The tar bytes and compressed
+blocks exist only in memory before transmission. OS filesystem cache and
+virtual-memory paging are outside that application-level guarantee.
+There is no compressed Content-Length, range support, resumability, cache,
+or precomputed archive. Raw downloads use the same bounded response path.
+OS sendfile-style zero-copy is not used: compression needs user-space bytes,
+and one consistent backpressure path simplifies raw fallback.
+
+Disconnects close the channel; producers stop on their next write or traversal
+check and release the download slot. A bounded number of already-submitted
+compression blocks may finish. A read failure after HTTP 200 has started is
+logged and sent as a body error, terminating the response rather than silently
+returning a valid archive. Before streaming starts, failures use HTTP error
+statuses. Ctrl+C stops accepting new connections and waits for active requests;
+there is no forced shutdown timeout.
+
+## Uploads and consistency
+
+The browser sends a raw `PUT` body for each file, not a buffered multipart
+form. The server enforces size both from Content-Length when present and
+from actual streamed bytes. A semaphore limits concurrent uploads separately
+from downloads; excess transfers fail with 503 rather than queue indefinitely.
+There is no global disk quota or per-client rate limit. A slow client can
+occupy a transfer slot, so use a reverse proxy with timeouts for wider exposure.
+
+Each upload writes an exclusively-created `.zfs-upload-*.part` staging file
+alongside its destination. Successful receipt flushes and synchronizes the file
+before `persist_noclobber` publishes it without overwriting an existing path.
+This costs an fsync and temporarily requires the full uploaded file's disk
+space, but does not require a second content copy or cross-volume rename.
+Normal error/cancellation cleanup removes staging files; process crashes can
+leave them for explicit operator cleanup. Upload staging is deliberately
+separate from the prohibition on intermediate compression output.
+
+Archives are live views, not snapshots. Files can change, disappear, or be
+uploaded while traversal is running; this may produce a mixed-time view or
+abort the download. For coherent backups, quiesce writers or serve an externally
+created filesystem snapshot. The utility does not create VSS snapshots.
+
+## Filesystem and network trust boundary
+
+The root is canonicalized at startup. Request paths reject absolute paths,
+parent/dot components, backslashes, alternate-stream colons, invalid Windows
+characters, DOS devices, trailing dots/spaces, and reserved upload names.
+Each existing path component is checked for links/reparse points. Listings
+mark inaccessible kinds as blocked, and recursive archives do not follow links.
+RFC 5987 attachment filenames preserve Unicode with an ASCII fallback.
+Browser filenames are inserted as text, not HTML.
+
+These path checks defend against HTTP path traversal, **not a hostile local
+filesystem writer**. There is a check/open race if a local user can replace
+checked directories with junctions, and ordinary hard links can expose data
+already linked into the root. Keep the serving tree under trusted local control
+and run with a least-privilege OS account. Fully race-resistant confinement
+would require handle-relative Windows opens and final-path verification for
+every operation, which is outside this trusted-folder utility's scope.
+
+There is intentionally no login, TLS, CORS, or internet-facing access policy.
+The required custom write header blocks simple cross-origin browser writes,
+but is not authentication and does not defend against DNS rebinding or native
+clients. CSP, nosniff, no-store, and attachment responses reduce browser content
+risks. Loopback binding or a trusted firewall is necessary when unrestricted
+LAN access is not desired. A production internet deployment needs an
+authenticated TLS reverse proxy, host validation, timeouts, and access controls.
+
+## Throughput and measurement
+
+Application throughput is bounded by the slowest of storage reads, tar/metadata
+work, block compression, serial checksumming/framing, memory copies, network,
+and the receiver. Typical NVMe sequential bandwidth is not a portable fixed
+threshold. Parallel LZ4 removes a common single-core limitation, but neither
+this architecture nor any codec can guarantee NVMe saturation for all input.
+Small-file trees are often metadata-bound; encrypted/media data gains little
+from compression. On slower networks, zstd can win overall despite more CPU.
+
+To benchmark, choose a source larger than the filesystem cache, test both
+compressible and incompressible data and small-file trees, and distinguish
+cold reads from warm-cache runs. Use a receiver/network fast enough not to cap
+the measurement. Compare raw to LZ4 at worker counts 1, 2, 4, and 8; record
+uncompressed source bytes / wall time, wire bytes, CPU, peak RSS, and disk
+throughput. Use curl to write the response to `NUL` when excluding client disk,
+then separately verify decoded content and archive entries. Do not call a tiny
+loopback correctness test an NVMe benchmark. No throughput result is claimed
+without these measurements.
+
+## CI and reproducibility
+
+GitHub Actions on `windows-2025` runs rustfmt, Clippy with denied warnings,
+locked dependency tests, and an optimized release build. Integration tests
+cover uploads, no-overwrite, paths, limits, aborted bodies, nested archives,
+and Windows junctions. The release smoke test exercises real HTTP requests
+and extraction with Windows tar. Artifacts include a SHA-256 checksum and
+have a 30-day retention period. Local testing downloads that artifact using
+GH_TOKEN without installing Rust, MSVC, Node, Docker, or a codec.
+
+Cargo.lock fixes dependency resolution; the stable Rust channel and hosted
+image evolve. This is repeatable CI, not a bit-for-bit reproducible or signed
+supply-chain build. Pin a Rust toolchain, action commit SHAs, and a controlled
+image if stronger reproducibility is needed. The supplied checksum catches
+download corruption but is not independent publisher authentication.
