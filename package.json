@@ -1,0 +1,12 @@
+{
+  "name": "zipped-serving-web-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests-web/commands.test.mjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}

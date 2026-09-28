@@ -1,5 +1,7 @@
 "use strict";
 
+import { initializeProfiles } from "./profile-ui.js";
+
 const $ = (id) => document.getElementById(id);
 let currentPath = "";
 let maxUploadBytes = 0;
@@ -7,6 +9,7 @@ let uploading = false;
 let activeUpload = null;
 let cancelRequested = false;
 let listingRequest = 0;
+const { selectCommandDirectory, showCommand } = initializeProfiles(checked);
 
 const childPath = (parent, name) => parent ? `${parent}/${name}` : name;
 const apiUrl = (action, path, extra = {}) =>
@@ -60,6 +63,7 @@ async function loadDirectory(path, push = true) {
   }
   $("download-directory").href = apiUrl("download", currentPath);
   $("download-directory-zstd").href = apiUrl("download", currentPath, { format: "zstd" });
+  selectCommandDirectory(currentPath);
   $("limit").textContent = `Upload limit: ${size(maxUploadBytes)} per file. Files upload sequentially.`;
   $("entries").replaceChildren();
   for (const entry of listing.entries) {
@@ -84,6 +88,14 @@ async function loadDirectory(path, push = true) {
       zstd.href = apiUrl("download", path, { format: "zstd" });
       zstd.textContent = entry.kind === "directory" ? ".tar.zstd" : ".zstd";
       cells[3].append(" | ", zstd);
+      if (entry.kind === "directory") {
+        const command = document.createElement("button");
+        command.type = "button";
+        command.textContent = "Client command";
+        command.setAttribute("aria-label", `Client command for ${entry.name}`);
+        command.addEventListener("click", () => showCommand(path));
+        cells[3].append(" | ", command);
+      }
       if (entry.kind === "file") {
         const raw = document.createElement("a");
         raw.href = apiUrl("download", path, { format: "raw" });
@@ -111,6 +123,7 @@ function uploadFile(file, path, index, total) {
       if (event.lengthComputable && event.loaded === event.total) {
         $("progress-label").textContent = `${index}/${total}: ${file.name} - saving on server...`;
       }
+
     };
     xhr.onload = () => {
       if (xhr.status === 201) resolve();
@@ -155,6 +168,7 @@ async function uploadFiles(files) {
   message(`${completed} file(s) uploaded.${failure ? ` ${failure}` : ""}`, Boolean(failure));
 }
 $("upload").addEventListener("change", (event) => uploadFiles(Array.from(event.target.files)));
+$("directory-command").addEventListener("click", () => showCommand(currentPath));
 $("cancel-upload").addEventListener("click", () => {
   cancelRequested = true;
   if (activeUpload) activeUpload.abort();

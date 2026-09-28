@@ -32,13 +32,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo update --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --exit-code -- src tests Cargo.lock
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git add --intent-to-add package-lock.json
+          git diff --exit-code -- src tests Cargo.lock package-lock.json
       - name: Prepare formatting fix
         if: failure() && steps.formatting.conclusion == 'failure'
         shell: pwsh
         run: |
           cargo fmt --all
-          git diff --output=rustfmt.patch -- src tests Cargo.lock
+          git diff --output=rustfmt.patch -- src tests Cargo.lock package-lock.json
       - uses: actions/upload-artifact@v4
         if: failure() && steps.formatting.conclusion == 'failure'
         with:
@@ -57,6 +60,15 @@ jobs:
       - name: Test chunked client and bounded memory
         shell: pwsh
         run: .\scripts\client-smoke-test.ps1 -Server .\target\x86_64-pc-windows-msvc\release\zipped-file-serving.exe -Client .\target\x86_64-pc-windows-msvc\release\zipped-file-client.exe -Large
+      - name: Test command generation and browser profiles
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:browser
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package
         shell: pwsh
         run: |
@@ -73,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: smoke-test-diagnostics
-          path: local-test\**\*.log
+          path: |
+            local-test\**\*.log
+            test-results\
           if-no-files-found: ignore
           retention-days: 3
       - uses: actions/upload-artifact@v4

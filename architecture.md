@@ -23,12 +23,68 @@ Files:
 | `src\compression.rs` | Ordered, bounded, parallel LZ4 frame writer |
 | `src\download.rs` | File/tar production, HTTP backpressure, attachment names |
 | `src\web\` | Embedded browser application |
+| `src\profiles.rs` | Durable, revision-controlled command profile CRUD |
 | `src\transfer.rs` | Shared codec, chunk envelope, negotiation types, incremental XXH3-128 |
 | `src\chunk_api.rs` | Manifest, independent chunk requests, staged upload sessions |
 | `src\client.rs` | Streaming client, extraction, chunk verification and publication |
 | `src\bin\zipped-file-client.rs` | Standalone client CLI |
 | `tests\http.rs` | API and filesystem integration tests |
 | `scripts\smoke-test.ps1` | Black-box Windows executable test without a compiler |
+
+## Server-persisted web command profiles
+
+The embedded web application can generate a PowerShell client download command
+for the current root/directory or a child directory row. A shared profile stores
+only its UUID, display name, client executable path, and general destination
+folder. Up to **99 profiles** are allowed, with case-insensitive unique names.
+Paths are client-side absolute Windows drive/UNC strings, not server filesystem
+operations. Profiles cannot supply arbitrary shell arguments or a command
+template. The selected remote directory, endpoint URL, and new output container
+are derived separately.
+
+The UI invokes the client using PowerShell's `&` operator with literal quoted
+arguments. ASCII and curly single quotes are doubled; control characters are
+rejected. Directory URL parameters are URL-encoded, and all display values use
+text/value properties rather than HTML. The default output container is
+`<directory>-download` (or `root-download`), because the client refuses existing
+output directories. The container name can be changed for repeat downloads,
+but cannot contain traversal or path separators. The browser origin supplies
+the server address; neither a bind address nor an untrusted forwarded host
+header is used. The operator must choose an origin reachable from the client.
+
+Profile storage defaults to `%LOCALAPPDATA%\ZippedServing\profiles.json` for the
+server account (`XDG_CONFIG_HOME`, then `HOME\.config` on non-Windows systems).
+`--profiles-file` overrides it. Keeping it outside the served tree avoids
+including workstation paths in downloads or permitting the upload API to
+replace configuration. The profiles endpoint creates the parent on first use
+and rejects storage within the canonical served root or linked/reparse-point
+data/lock files. The local configuration directory must remain trusted against
+hostile local filesystem mutations.
+
+Every read or mutation takes an OS file lock on an adjacent stable `.lock` file,
+loads and validates a versioned JSON document, and releases the lock on return.
+There is no stale per-process cache. Mutations enforce the 99 limit and a global
+revision under the same lock, so concurrent browsers/processes cannot exceed
+the cap or overwrite unseen edits. A busy lock returns 503; stale revisions and
+duplicate names return 409. A new revision is returned only after writing and
+syncing a temporary file and atomically replacing the JSON file. Failed writes
+are not reflected as successful in-memory state. The schema is bounded to
+1 MiB, individual paths to 4096 UTF-8 bytes, names to 100 bytes, and HTTP JSON
+mutation bodies to 32 KiB. Bad existing storage is an explicit error, never an
+automatic reset. JSON was chosen over a database for this small bounded set.
+The directory entry itself is not fsynced, so this is not a power-loss-proof
+transaction log; back up the JSON if the profiles matter.
+
+These settings are shared, not private user accounts. No credentials are
+stored, and the server still has no authentication: all reachable clients can
+read or mutate profiles with the existing custom write-header safeguard.
+Generated commands are previews, never executed by the web server. An operator
+must inspect shared executable paths before running them. Profile CRUD deletes
+configuration entries only; it does not delete served files or client files.
+The chosen profile is page-local, whereas profile contents survive browser and
+server restarts. Clipboard support uses the secure-context API when available,
+then selection-based copying; failure leaves the command selected with explicit
+manual-copy instructions for HTTP LAN browsers.
 
 ## Compression choice
 

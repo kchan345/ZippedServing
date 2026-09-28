@@ -32,6 +32,9 @@ struct Args {
     /// Maximum negotiated uncompressed chunk size in MiB.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
     max_chunk_mib: u16,
+    /// JSON profile storage outside the served tree (default: LOCALAPPDATA\\ZippedServing\\profiles.json).
+    #[arg(long)]
+    profiles_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -48,6 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.max_uploads = usize::from(args.max_uploads);
     config.max_upload_bytes = args.max_upload_bytes;
     config.max_chunk_bytes = u64::from(args.max_chunk_mib) * 1024 * 1024;
+    if let Some(file) = args.profiles_file {
+        config.profiles_file = file;
+    }
     let root = config.root.clone();
     let router = app(config)?;
     let listener = TcpListener::bind((args.bind, args.port)).await?;

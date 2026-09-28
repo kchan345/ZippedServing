@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Local file server</title>
   <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
+  <script src="/app.js" type="module"></script>
 </head>
 <body>
   <main>
@@ -18,8 +18,39 @@
       <button id="mkdir" type="button">New folder</button>
       <a id="download-directory" class="button">Download directory (.tar.lz4)</a>
       <a id="download-directory-zstd" class="button">Download directory (.tar.zstd)</a>
+      <button id="directory-command" type="button">Client command</button>
       <label class="button">Upload files <input id="upload" type="file" multiple></label>
     </section>
+    <details id="client-command">
+      <summary>Copy a client download command</summary>
+      <p>Save up to 99 shared profiles on the server. Paths refer to the <strong>client machine</strong>,
+        not the server. Everyone with access to this server can view and edit these profiles.
+        Do not store secrets. Review the executable path before running a shared command.</p>
+      <div class="profile-controls">
+        <label>Profile <select id="profile-select" disabled><option value="">Loading profiles...</option></select></label>
+        <button id="profile-new" type="button" disabled>New profile</button>
+        <button id="profile-delete" type="button" disabled>Delete profile</button>
+        <button id="profile-reload" type="button">Reload profiles</button>
+        <span id="profile-count"></span>
+      </div>
+      <form id="profile-form">
+        <fieldset id="profile-fields" disabled>
+          <label>Profile name <input id="profile-name" required maxlength="100" placeholder="My workstation"></label>
+          <label>Client executable <input id="profile-client" required maxlength="4096" placeholder="C:\Tools\zipped-file-client.exe" spellcheck="false"></label>
+          <label>General download folder <input id="profile-folder" required maxlength="4096" placeholder="D:\Downloads" spellcheck="false"></label>
+          <button id="profile-save" type="submit">Save profile</button>
+        </fieldset>
+      </form>
+      <p id="profile-status" role="status" aria-live="polite"></p>
+      <p>Directory: <strong id="command-directory">Root</strong></p>
+      <label>New output folder name <input id="command-output" spellcheck="false"></label>
+      <p>The general download folder must exist. The new output folder must not exist;
+        the downloaded directory will be placed inside it. Change this name for repeat downloads.
+        The URL uses this browser's server address; open the page with an address reachable from your client.</p>
+      <label>PowerShell command <textarea id="command-text" rows="4" readonly spellcheck="false"></textarea></label>
+      <button id="command-copy" type="button" disabled>Copy command</button>
+      <p id="command-status" role="status" aria-live="polite"></p>
+    </details>
     <p id="limit"></p>
     <div id="drop-zone">Drop files here to upload into the current directory.</div>
     <section id="transfer" hidden>
