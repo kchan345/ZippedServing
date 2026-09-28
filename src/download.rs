@@ -2,7 +2,9 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
 };
 
 use axum::{
@@ -12,8 +14,9 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
+use futures_util::Stream;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{ApiError, AppState, blocking, compression::ParallelLz4, paths};
@@ -83,15 +86,31 @@ enum Source {
     Directory(PathBuf),
 }
 
+struct DownloadStream {
+    receiver: ReceiverStream<io::Result<Bytes>>,
+    // Hold the slot until both the HTTP body and producer have finished.
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+impl Stream for DownloadStream {
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
+
 pub(crate) async fn download(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DownloadQuery>,
 ) -> Result<Response, ApiError> {
-    let permit = state
-        .downloads
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::busy())?;
+    let permit = Arc::new(
+        state
+            .downloads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::busy())?,
+    );
     let setup_state = state.clone();
     let (source, name) = blocking(move || {
         let path = paths::resolve(&setup_state.config.root, &query.path)?;
@@ -128,6 +147,7 @@ pub(crate) async fn download(
     let filename = format!("{name}{suffix}");
     let disposition = content_disposition(&filename);
     let (send, receive) = mpsc::channel(CHANNEL_DEPTH);
+    let body_permit = permit.clone();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let output = ChannelWriter {
@@ -156,7 +176,10 @@ pub(crate) async fn download(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_DISPOSITION, disposition)
         .header("x-accel-buffering", "no")
-        .body(Body::from_stream(ReceiverStream::new(receive)))
+        .body(Body::from_stream(DownloadStream {
+            receiver: ReceiverStream::new(receive),
+            _permit: body_permit,
+        }))
         .map_err(|error| {
             tracing::error!(%error, "Failed to build download response");
             ApiError::new(

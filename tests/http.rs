@@ -307,3 +307,37 @@ async fn windows_junctions_are_not_served_or_archived() {
     assert_eq!(archive.entries().unwrap().count(), 1);
     fs::remove_dir(junction).unwrap();
 }
+
+#[tokio::test]
+async fn download_limit_covers_buffered_bodies_and_releases_on_disconnect() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("small.txt"), "small response").unwrap();
+    fs::write(root.path().join("large.bin"), vec![0; 8 * 1024 * 1024]).unwrap();
+    let mut config = Config::new(root.path()).unwrap();
+    config.compression_threads = 1;
+    config.max_downloads = 1;
+    let router = app(config).unwrap();
+    for path in ["small.txt", "large.bin"] {
+        let uri = format!("/api/download?path={path}&format=raw");
+        let first = request(&router, "GET", &uri, Body::empty()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            request(&router, "GET", &uri, Body::empty()).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(first);
+        let mut released = false;
+        for _ in 0..100 {
+            let retry = request(&router, "GET", &uri, Body::empty()).await;
+            if retry.status() == StatusCode::OK {
+                bytes(retry).await;
+                released = true;
+                break;
+            }
+            assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(released, "Download slot leaked after dropping {path}");
+    }
+}
