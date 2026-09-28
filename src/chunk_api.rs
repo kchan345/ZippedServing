@@ -202,9 +202,7 @@ pub(crate) async fn download_chunk(
         .into_response())
 }
 
-fn sessions(
-    state: &AppState,
-) -> Result<std::sync::MutexGuard<'_, UploadMap>, ApiError> {
+fn sessions(state: &AppState) -> Result<std::sync::MutexGuard<'_, UploadMap>, ApiError> {
     let mut sessions = state.sessions.lock().map_err(|error| {
         tracing::error!(%error, "Upload session lock poisoned");
         ApiError::new(

@@ -293,7 +293,8 @@ impl<R: Read> Read for Budget<R> {
 pub fn extract_archive(mut input: impl Read, destination: &Path, max_bytes: u64) -> io::Result<()> {
     let mut magic = [0; 4];
     input.read_exact(&mut magic)?;
-    let input = BufReader::with_capacity(transfer::BUFFER_SIZE, io::Cursor::new(magic).chain(input));
+    let input =
+        BufReader::with_capacity(transfer::BUFFER_SIZE, io::Cursor::new(magic).chain(input));
     if magic.starts_with(&[0x04, 0x22, 0x4d, 0x18]) {
         let mut decoder = lz4::Decoder::new(input)?;
         extract_tar(&mut decoder, destination, max_bytes)?;
@@ -319,7 +320,10 @@ pub fn extract_archive(mut input: impl Read, destination: &Path, max_bytes: u64)
 
 fn extract_tar(input: impl Read, destination: &Path, max_bytes: u64) -> io::Result<()> {
     let reader = TarGuard {
-        input: Budget { input, remaining: max_bytes },
+        input: Budget {
+            input,
+            remaining: max_bytes,
+        },
         header: [0; 512],
         position: 512,
         remaining: 0,
@@ -388,28 +392,44 @@ struct TarGuard<R> {
 
 impl<R: Read> Read for TarGuard<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() { return Ok(0); }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
         if self.position == 512 && self.remaining > 0 {
-            let length = buffer.len().min(self.remaining.min(usize::MAX as u64) as usize);
+            let length = buffer
+                .len()
+                .min(self.remaining.min(usize::MAX as u64) as usize);
             let count = self.input.read(&mut buffer[..length])?;
-            if count == 0 { return Err(transfer::invalid("Truncated tar entry")); }
+            if count == 0 {
+                return Err(transfer::invalid("Truncated tar entry"));
+            }
             self.remaining -= count as u64;
             return Ok(count);
         }
         if self.position == 512 {
-            if self.input.read(&mut self.header[..1])? == 0 { return Ok(0); }
+            if self.input.read(&mut self.header[..1])? == 0 {
+                return Ok(0);
+            }
             self.input.read_exact(&mut self.header[1..])?;
             self.position = 0;
             if self.header.iter().any(|byte| *byte != 0) {
                 self.headers += 1;
-                if self.headers > transfer::MAX_ENTRIES { return Err(transfer::invalid("Too many tar headers")); }
+                if self.headers > transfer::MAX_ENTRIES {
+                    return Err(transfer::invalid("Too many tar headers"));
+                }
                 let header = tar::Header::from_byte_slice(&self.header);
                 let size = header.size()?;
                 // Tar buffers extension records internally; cap those, not regular file data.
-                if matches!(header.entry_type().as_byte(), b'L' | b'K' | b'x' | b'g') && size > 1024 * 1024 {
+                if matches!(header.entry_type().as_byte(), b'L' | b'K' | b'x' | b'g')
+                    && size > 1024 * 1024
+                {
                     return Err(transfer::invalid("Tar metadata record exceeds 1 MiB"));
                 }
-                self.remaining = size.checked_add(511).ok_or_else(|| transfer::invalid("Tar size overflow"))? / 512 * 512;
+                self.remaining = size
+                    .checked_add(511)
+                    .ok_or_else(|| transfer::invalid("Tar size overflow"))?
+                    / 512
+                    * 512;
             }
         }
         let count = buffer.len().min(512 - self.position);
