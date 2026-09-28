@@ -64,10 +64,12 @@ impl<W: Write> Encoder<W> {
     }
 
     pub fn finish(self) -> io::Result<W> {
-        match self {
+        let mut output = match self {
             Self::Lz4(encoder) => encoder.finish(),
             Self::Zstd(encoder) => encoder.finish(),
-        }
+        }?;
+        output.flush()?;
+        Ok(output)
     }
 }
 

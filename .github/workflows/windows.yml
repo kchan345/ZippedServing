@@ -68,6 +68,14 @@ jobs:
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
           } | Set-Content .\dist\SHA256SUMS.txt -Encoding ascii
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-diagnostics
+          path: local-test\**\*.log
+          if-no-files-found: ignore
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         with:
           name: zipped-file-serving-windows-x64

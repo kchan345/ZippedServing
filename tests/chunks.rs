@@ -240,6 +240,36 @@ async fn invalid_negotiation_changed_sources_and_cancelled_sessions() {
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
+#[tokio::test]
+async fn conventional_http_archives_flush_the_complete_codec_frame() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("folder")).unwrap();
+    fs::write(root.path().join("folder/data"), b"final bytes").unwrap();
+    let router = app(Config::new(root.path()).unwrap()).unwrap();
+    for codec in ["lz4", "zstd"] {
+        let response = call(
+            &router,
+            "GET",
+            &format!("/api/download?path=folder&format={codec}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = bytes(response).await;
+        let output = tempfile::tempdir().unwrap();
+        zipped_file_serving::client::extract_archive(
+            body.as_slice(),
+            output.path(),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(output.path().join("folder/data")).unwrap(),
+            b"final bytes"
+        );
+    }
+}
+
 #[test]
 fn streaming_tar_decoders_enforce_integrity_and_output_limits() {
     let mut tar = tar::Builder::new(Vec::new());
