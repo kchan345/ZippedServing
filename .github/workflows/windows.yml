@@ -1,8 +1,8 @@
-name: Windows executable
+name: Windows server and client
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
   workflow_dispatch:
 
@@ -24,15 +24,21 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
           rustup target add x86_64-pc-windows-msvc
-      - name: Formatting
+      - name: Formatting and dependency lockfile
         id: formatting
-        run: cargo fmt --all --check
+        shell: pwsh
+        run: |
+          cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo update --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- src tests Cargo.lock
       - name: Prepare formatting fix
         if: failure() && steps.formatting.conclusion == 'failure'
         shell: pwsh
         run: |
           cargo fmt --all
-          git diff --output=rustfmt.patch -- src tests
+          git diff --output=rustfmt.patch -- src tests Cargo.lock
       - uses: actions/upload-artifact@v4
         if: failure() && steps.formatting.conclusion == 'failure'
         with:
@@ -48,14 +54,20 @@ jobs:
       - name: Test the release executable over HTTP
         shell: pwsh
         run: .\scripts\smoke-test.ps1 -Executable .\target\x86_64-pc-windows-msvc\release\zipped-file-serving.exe
+      - name: Test chunked client and bounded memory
+        shell: pwsh
+        run: .\scripts\client-smoke-test.ps1 -Server .\target\x86_64-pc-windows-msvc\release\zipped-file-serving.exe -Client .\target\x86_64-pc-windows-msvc\release\zipped-file-client.exe -Large
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item .\target\x86_64-pc-windows-msvc\release\zipped-file-serving.exe .\dist\
+          Copy-Item .\target\x86_64-pc-windows-msvc\release\zipped-file-client.exe .\dist\
           Copy-Item readme.md, architecture.md, LICENSE .\dist\
-          $hash = (Get-FileHash .\dist\zipped-file-serving.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  zipped-file-serving.exe" | Set-Content .\dist\SHA256SUMS.txt -Encoding ascii
+          Get-ChildItem .\dist\*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content .\dist\SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: zipped-file-serving-windows-x64

@@ -29,6 +29,9 @@ struct Args {
     /// Maximum bytes per uploaded file (default: 100 GiB).
     #[arg(long, default_value_t = 107_374_182_400, value_parser = clap::value_parser!(u64).range(1..))]
     max_upload_bytes: u64,
+    /// Maximum negotiated uncompressed chunk size in MiB.
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
+    max_chunk_mib: u16,
 }
 
 #[tokio::main]
@@ -44,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.max_downloads = usize::from(args.max_downloads);
     config.max_uploads = usize::from(args.max_uploads);
     config.max_upload_bytes = args.max_upload_bytes;
+    config.max_chunk_bytes = u64::from(args.max_chunk_mib) * 1024 * 1024;
     let root = config.root.clone();
     let router = app(config)?;
     let listener = TcpListener::bind((args.bind, args.port)).await?;

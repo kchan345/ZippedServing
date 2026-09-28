@@ -207,7 +207,7 @@ async fn rejects_invalid_paths_missing_files_and_oversized_uploads() {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(&router, "GET", "/api/download?format=zstd", Body::empty())
+        request(&router, "GET", "/api/download?format=unsupported", Body::empty())
             .await
             .status(),
         StatusCode::BAD_REQUEST
