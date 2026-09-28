@@ -1,8 +1,8 @@
+mod chunk_api;
+pub mod client;
 mod compression;
 mod download;
 mod paths;
-mod chunk_api;
-pub mod client;
 pub mod transfer;
 
 use std::{fs, io, path::PathBuf, sync::Arc, time::UNIX_EPOCH};

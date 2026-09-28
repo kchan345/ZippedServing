@@ -19,7 +19,10 @@ use serde::Deserialize;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{ApiError, AppState, blocking, paths, transfer::{Codec, Encoder}};
+use crate::{
+    ApiError, AppState, blocking, paths,
+    transfer::{Codec, Encoder},
+};
 
 const CHUNK_SIZE: usize = 256 * 1024;
 const CHANNEL_DEPTH: usize = 8;
@@ -207,7 +210,11 @@ fn produce(
         }
         return output.flush();
     }
-    let codec = if matches!(format, Format::Zstd) { Codec::Zstd } else { Codec::Lz4 };
+    let codec = if matches!(format, Format::Zstd) {
+        Codec::Zstd
+    } else {
+        Codec::Lz4
+    };
     let mut encoder = Encoder::new(output, codec, pool)?;
     match source {
         Source::File(mut file) => {

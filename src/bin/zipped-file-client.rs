@@ -1,10 +1,16 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
-use zipped_file_serving::{client::{self, Options}, transfer::Codec};
+use zipped_file_serving::{
+    client::{self, Options},
+    transfer::Codec,
+};
 
 #[derive(Parser)]
-#[command(version, about = "Streaming LZ4/zstd download, extraction, and verified chunk uploads")]
+#[command(
+    version,
+    about = "Streaming LZ4/zstd download, extraction, and verified chunk uploads"
+)]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -48,11 +54,21 @@ fn main() -> std::process::ExitCode {
         compression_threads: usize::from(args.compression_threads),
     };
     let result = match args.command {
-        Command::Download { url, output, archive } => client::download(&url, &output, archive, &options),
+        Command::Download {
+            url,
+            output,
+            archive,
+        } => client::download(&url, &output, archive, &options),
         Command::Upload { input, url } => client::upload(&input, &url, &options),
     };
     match result {
-        Ok(()) => { eprintln!("Transfer complete and verified."); std::process::ExitCode::SUCCESS }
-        Err(error) => { eprintln!("Transfer failed: {error}"); std::process::ExitCode::FAILURE }
+        Ok(()) => {
+            eprintln!("Transfer complete and verified.");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Transfer failed: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

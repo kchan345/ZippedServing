@@ -145,7 +145,10 @@ pub fn encode_chunk(
         return Err(invalid("Chunk exceeds protocol maximum"));
     }
     output.write_all(b"ZFC1")?;
-    output.write_all(&[match codec { Codec::Lz4 => 1, Codec::Zstd => 2 }])?;
+    output.write_all(&[match codec {
+        Codec::Lz4 => 1,
+        Codec::Zstd => 2,
+    }])?;
     output.write_all(&offset.to_le_bytes())?;
     output.write_all(&length.to_le_bytes())?;
     let mut encoder = Encoder::new(Records(&mut output), codec, pool)?;
@@ -176,14 +179,19 @@ pub fn decode_chunk(
 ) -> io::Result<String> {
     let mut header = [0; 21];
     input.read_exact(&mut header)?;
-    let codec_id = match codec { Codec::Lz4 => 1, Codec::Zstd => 2 };
+    let codec_id = match codec {
+        Codec::Lz4 => 1,
+        Codec::Zstd => 2,
+    };
     if &header[..4] != b"ZFC1"
         || header[4] != codec_id
         || u64::from_le_bytes(header[5..13].try_into().unwrap()) != offset
         || u64::from_le_bytes(header[13..21].try_into().unwrap()) != length
         || length > MAX_SPLIT
     {
-        return Err(invalid("Chunk header differs from negotiated codec, offset, or length"));
+        return Err(invalid(
+            "Chunk header differs from negotiated codec, offset, or length",
+        ));
     }
     let mut records = RecordReader {
         input,
@@ -200,8 +208,10 @@ pub fn decode_chunk(
         }
         Codec::Zstd => {
             let mut decoder = zstd::stream::read::Decoder::with_buffer(BufReader::with_capacity(
-                BUFFER_SIZE, &mut records,
-            ))?.single_frame();
+                BUFFER_SIZE,
+                &mut records,
+            ))?
+            .single_frame();
             decoder.window_log_max(23)?;
             let hash = copy_verified(&mut decoder, &mut output, length)?;
             if !decoder.finish().buffer().is_empty() {
@@ -230,13 +240,19 @@ fn copy_verified(input: &mut impl Read, output: &mut impl Write, length: u64) ->
     let mut received = 0_u64;
     loop {
         let count = input.read(&mut buffer)?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         received += count as u64;
-        if received > length { return Err(invalid("Decoded chunk exceeds negotiated length")); }
+        if received > length {
+            return Err(invalid("Decoded chunk exceeds negotiated length"));
+        }
         hash.update(&buffer[..count]);
         output.write_all(&buffer[..count])?;
     }
-    if received != length { return Err(invalid("Decoded chunk is incomplete")); }
+    if received != length {
+        return Err(invalid("Decoded chunk is incomplete"));
+    }
     Ok(hash.digest128())
 }
 
@@ -288,22 +304,54 @@ mod tests {
 
     #[test]
     fn codecs_verify_boundaries_corruption_and_truncation() {
-        let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap(),
+        );
         for codec in [Codec::Lz4, Codec::Zstd] {
             for length in [0, 1, BUFFER_SIZE - 1, BUFFER_SIZE + 1, 4 * 1024 * 1024 + 17] {
                 let data: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
                 let mut encoded = Vec::new();
-                let hash = encode_chunk(data.as_slice(), &mut encoded, codec, 77, length as u64, pool.clone()).unwrap();
+                let hash = encode_chunk(
+                    data.as_slice(),
+                    &mut encoded,
+                    codec,
+                    77,
+                    length as u64,
+                    pool.clone(),
+                )
+                .unwrap();
                 let mut decoded = Vec::new();
-                assert_eq!(decode_chunk(encoded.as_slice(), &mut decoded, codec, 77, length as u64).unwrap(), hash);
+                assert_eq!(
+                    decode_chunk(encoded.as_slice(), &mut decoded, codec, 77, length as u64)
+                        .unwrap(),
+                    hash
+                );
                 assert_eq!(decoded, data);
-                assert!(decode_chunk(encoded.as_slice(), io::sink(), codec, 78, length as u64).is_err());
+                assert!(
+                    decode_chunk(encoded.as_slice(), io::sink(), codec, 78, length as u64).is_err()
+                );
                 let mut corrupt = encoded.clone();
                 *corrupt.last_mut().unwrap() ^= 1;
-                assert!(decode_chunk(corrupt.as_slice(), io::sink(), codec, 77, length as u64).is_err());
-                assert!(decode_chunk(&encoded[..encoded.len()-1], io::sink(), codec, 77, length as u64).is_err());
+                assert!(
+                    decode_chunk(corrupt.as_slice(), io::sink(), codec, 77, length as u64).is_err()
+                );
+                assert!(
+                    decode_chunk(
+                        &encoded[..encoded.len() - 1],
+                        io::sink(),
+                        codec,
+                        77,
+                        length as u64
+                    )
+                    .is_err()
+                );
                 encoded.push(0);
-                assert!(decode_chunk(encoded.as_slice(), io::sink(), codec, 77, length as u64).is_err());
+                assert!(
+                    decode_chunk(encoded.as_slice(), io::sink(), codec, 77, length as u64).is_err()
+                );
             }
         }
     }
